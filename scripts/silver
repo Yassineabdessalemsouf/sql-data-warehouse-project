@@ -1,1 +1,167 @@
+-- PostgreSQL: silver.load_silver procedure
+-- Fixes: CREATE OR ALTER -> CREATE OR REPLACE PROCEDURE ... LANGUAGE plpgsql AS $$ ... $$
+-- Also fixed typo: crm_sales_ddetails -> crm_sales_details
 
+CREATE OR REPLACE PROCEDURE silver.load_silver()
+LANGUAGE plpgsql
+AS $$
+BEGIN
+
+    ------------------crm tabel------------------
+
+    DROP TABLE IF EXISTS silver.customer CASCADE;
+
+    CREATE TABLE silver.customer AS
+    SELECT 
+        ROW_NUMBER() OVER (ORDER BY cst_key) AS customer_id,
+        TRIM(cst_key) AS customer_key,
+        TRIM(cst_firstname) AS first_name,
+        TRIM(cst_lastname) AS last_name,
+        CONCAT(TRIM(cst_firstname), ' ', TRIM(cst_lastname)) AS full_name,
+        -- Marital Status: S → Single, M → Married, empty → N/A
+        CASE 
+            WHEN TRIM(cst_marital_status) = '' OR cst_marital_status IS NULL THEN 'N/A'
+            WHEN UPPER(TRIM(cst_marital_status)) = 'S' THEN 'Single'
+            WHEN UPPER(TRIM(cst_marital_status)) = 'M' THEN 'Married'
+            ELSE TRIM(cst_marital_status)
+        END AS marital_status,
+        -- Gender: M → Male, F → Female, empty/null → N/A
+        CASE 
+            WHEN TRIM(cst_gndr) = '' OR cst_gndr IS NULL THEN 'N/A'
+            WHEN UPPER(TRIM(cst_gndr)) = 'M' THEN 'Male'
+            WHEN UPPER(TRIM(cst_gndr)) = 'F' THEN 'Female'
+            ELSE TRIM(cst_gndr)
+        END AS gender,
+        cst_create_date AS created_date,
+        CURRENT_TIMESTAMP AS loaded_at
+    FROM bronze.crm_cust_info
+    WHERE TRIM(cst_key) IS NOT NULL
+        AND TRIM(cst_key) != ''
+        AND TRIM(cst_firstname) IS NOT NULL
+        AND TRIM(cst_firstname) != ''         -- Exclude rows with no first name (junk records)
+        AND TRIM(cst_lastname) IS NOT NULL
+        AND TRIM(cst_lastname) != ''          -- Exclude rows with no last name (junk records)
+    ORDER BY cst_key;
+
+
+    -- ======================================================================================================================
+
+
+    DROP TABLE IF EXISTS silver.crm_prd_info CASCADE;
+
+    CREATE TABLE silver.crm_prd_info AS
+    SELECT
+        prd_id,
+        REPLACE(SUBSTRING(prd_key, 1, 5), '-', '_') AS cat_id,
+        SUBSTRING(prd_key, 7) AS prd_key,              
+        prd_nm,
+        COALESCE(prd_cost, 0) AS prd_cost,              
+        CASE UPPER(TRIM(prd_line))
+            WHEN 'M' THEN 'Mountain'
+            WHEN 'R' THEN 'Road'
+            WHEN 'S' THEN 'Other Sales'
+            WHEN 'T' THEN 'Touring'
+            ELSE 'n/a'
+        END AS prd_line,
+        CAST(prd_start_dt AS DATE) AS prd_start_dt,
+        CAST(
+            LEAD(prd_start_dt) OVER (PARTITION BY prd_key ORDER BY prd_start_dt) - 1 
+            AS DATE
+        ) AS prd_end_dt
+    FROM bronze.crm_prd_info;
+
+
+    ----------------------------------------------------------------------------------
+
+
+    DROP TABLE IF EXISTS silver.crm_sales_details CASCADE;
+
+    CREATE TABLE silver.crm_sales_details AS 
+    SELECT DISTINCT
+        sls_ord_num,
+        sls_prd_key,
+        sls_cust_id,
+
+        CASE 
+            WHEN sls_order_dt = 0 OR LENGTH(sls_order_dt::TEXT) != 8 THEN NULL 
+            ELSE CAST(CAST(sls_order_dt AS VARCHAR) AS DATE)
+        END AS sls_order_dt,
+
+        CASE 
+            WHEN sls_ship_dt = 0 OR LENGTH(sls_ship_dt::TEXT) != 8 THEN NULL 
+            ELSE CAST(CAST(sls_ship_dt AS VARCHAR) AS DATE)
+        END AS sls_ship_dt,
+
+        CASE 
+            WHEN sls_due_dt = 0 OR LENGTH(sls_due_dt::TEXT) != 8 THEN NULL 
+            ELSE CAST(CAST(sls_due_dt AS VARCHAR) AS DATE)
+        END AS sls_due_dt,
+
+        CASE 
+            WHEN sls_sales IS NULL OR sls_sales <= 0 OR sls_sales != sls_quantity * ABS(sls_price) 
+            THEN sls_quantity * ABS(sls_price)
+            ELSE sls_sales
+        END AS sls_sales,
+
+        sls_quantity,
+
+        CASE 
+            WHEN sls_price IS NULL OR sls_price <= 0 
+            THEN sls_sales / NULLIF(sls_quantity, 0)
+            ELSE sls_price
+        END AS sls_price          
+
+    FROM bronze.crm_sales_details;
+
+
+    -------------------erp table --------------------------
+
+    DROP TABLE IF EXISTS silver.erp_cust_az12 CASCADE;
+
+    CREATE TABLE silver.erp_cust_az12 AS
+    SELECT 
+        CASE 
+            WHEN cid LIKE 'NAS%' THEN SUBSTRING(cid, 4)
+            ELSE cid
+        END AS cid,
+        CASE 
+            WHEN bdate > CURRENT_DATE THEN NULL           -- GETDATE() -> CURRENT_DATE
+            ELSE bdate
+        END AS bdate,
+        CASE 
+            WHEN UPPER(TRIM(gen)) IN ('F', 'FEMALE') THEN 'Female'
+            WHEN UPPER(TRIM(gen)) IN ('M', 'MALE') THEN 'Male'
+            ELSE 'n/a'
+        END AS gen
+    FROM bronze.erp_cust_az12;
+
+
+    --------------
+    DROP TABLE IF EXISTS silver.erp_loc_a101 CASCADE;
+
+    CREATE TABLE silver.erp_loc_a101 AS
+    SELECT
+        REPLACE(cid, '-', '') AS cid,    -- remove dashes so it matches cst_key format
+        CASE 
+            WHEN TRIM(cntry) = 'DE' THEN 'Germany'
+            WHEN TRIM(cntry) IN ('US', 'USA') THEN 'United States'
+            WHEN TRIM(cntry) = '' OR cntry IS NULL THEN 'n/a'
+            ELSE TRIM(cntry)
+        END AS cntry    -- Normalize and handle missing or blank country codes
+    FROM bronze.erp_loc_a101;
+
+    -------------------------------------
+    DROP TABLE IF EXISTS silver.erp_px_cat_g1v2 CASCADE;
+
+    CREATE TABLE silver.erp_px_cat_g1v2 AS
+    SELECT
+        id,
+        cat,
+        subcat,
+        maintenance
+    FROM bronze.erp_px_cat_g1v2;
+
+    RAISE NOTICE 'silver.load_silver completed successfully';
+
+END;
+$$;
