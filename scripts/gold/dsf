@@ -1,0 +1,65 @@
+
+create view gold.dim_customers as 
+SELECT 
+	row_number() over (order by ci.customer_id) as customer_key,
+    ci.customer_id as customer_id,
+    ci.customer_key as customer_number,
+    ci.first_name as first_name,
+    ci.last_name as last_name,
+    la.cntry as country,
+    case when ci.gender !='n/a' then ci.gender
+    	else coalesce(ca.gen,'n/a')
+    end as gender,
+    ci.marital_status as marital_status,
+    ca.bdate as birth_date
+    
+    
+    
+from silver.customer ci
+left join silver.erp_cust_az12 ca 
+on ci.customer_key =ca.cid
+left join silver.erp_loc_a101 la 
+on ci.customer_key = la.cid ;
+
+---------------------------------c---------------------
+
+
+create view gold.dim_products as 
+select 
+	row_number() over(order by pn.prd_start_dt ,pn.prd_key ) as product_key,
+	pn.prd_id as product_id,
+	pn.prd_key as product_number, 
+	pn.prd_nm as product_name,
+	pn.cat_id as category_id,
+	pc.cat as category,
+	pc.subcat as sub_category,
+	pc.maintenance,
+	pn.prd_cost as product_cost,
+	pn.prd_line as product_line,
+	pn.prd_start_dt as start_ate
+	
+from silver.crm_prd_info pn
+left join silver.erp_px_cat_g1v2 pc 
+on pn.cat_id=pc.id 
+where pn.prd_end_dt is null
+
+-----------------------------------------------------------
+create view gold.fact_sales as
+select 
+	sd.sls_ord_num order_number,
+    pr.product_key ,
+    dc.customer_key,
+    sd.sls_order_dt order_date,
+    sd.sls_ship_dt shiping_date,
+    sd.sls_due_dt due_date,
+    sd.sls_sales sales_amount,
+    sd.sls_quantity quantity,
+    sd.sls_price price
+
+
+
+
+from silver.crm_sales_details sd
+left join gold.dim_products pr on sd.sls_prd_key = pr.product_number 
+left join gold.dim_customers dc on sd.sls_cust_id = dc.customer_id 
+;
